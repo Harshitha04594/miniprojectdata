@@ -1,0 +1,80 @@
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+import os
+import shutil
+import cv2
+import numpy as np
+from skimage.metrics import structural_similarity as ssim
+
+app = FastAPI()
+security = HTTPBasic()
+
+PRODUCT_IMAGES_DIR = "product_images/"
+RETURNED_IMAGES_DIR = "returned_images/"
+os.makedirs(PRODUCT_IMAGES_DIR, exist_ok=True)
+os.makedirs(RETURNED_IMAGES_DIR, exist_ok=True)
+
+# Dummy authentication
+USERS = {
+    "owner": "owner123",
+    "delivery": "delivery123"
+}
+
+# Authentication function
+def authenticate_user(credentials: HTTPBasicCredentials = Depends(security)):
+    if credentials.username not in USERS or USERS[credentials.username] != credentials.password:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return credentials.username
+
+# Function to compare images using SSIM
+def compare_images(img1_path, img2_path):
+    img1 = cv2.imread(img1_path, cv2.IMREAD_GRAYSCALE)
+    img2 = cv2.imread(img2_path, cv2.IMREAD_GRAYSCALE)
+
+    if img1 is None or img2 is None:
+        return 0.0
+
+    img1 = cv2.resize(img1, (300, 300))
+    img2 = cv2.resize(img2, (300, 300))
+
+    score, _ = ssim(img1, img2, full=True)
+    return score
+
+# Owner uploads product images
+@app.post("/upload_product_image")
+async def upload_product_image(product_id: str, file: UploadFile = File(...), user: str = Depends(authenticate_user)):
+    if user != "owner":
+        raise HTTPException(status_code=403, detail="Only owner can upload product images.")
+    
+    file_path = os.path.join(PRODUCT_IMAGES_DIR, f"{product_id}.jpg")
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    
+    return {"message": "Product image uploaded successfully!", "file_path": file_path}
+
+# Delivery agent uploads return images for verification
+@app.post("/verify_return")
+async def verify_return(product_id: str, file: UploadFile = File(...), user: str = Depends(authenticate_user)):
+    if user != "delivery":
+        raise HTTPException(status_code=403, detail="Only delivery agent can verify returns.")
+    
+    returned_path = os.path.join(RETURNED_IMAGES_DIR, f"{product_id}_returned.jpg")
+    original_path = os.path.join(PRODUCT_IMAGES_DIR, f"{product_id}.jpg")
+
+    with open(returned_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    if not os.path.exists(original_path):
+        return {"error": "Original product image not found!", "product_id": product_id}
+
+    similarity_score = compare_images(original_path, returned_path)
+
+    if similarity_score > 0.5:
+        return {"status": "Approved", "similarity": similarity_score, "product_id": product_id}
+    else:
+        return {"status": "Rejected", "similarity": similarity_score, "product_id": product_id}
+
+# Start the FastAPI server
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
